@@ -25,17 +25,35 @@
 # need. To scale beyond one host, use managed datastores + the `docker run`
 # path; this compose is single-node by design.
 # ============================================================================
-
+# ============================================================================
+# Quackback — production stack with Caddy HTTPS Reverse Proxy
+# ============================================================================
 services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: quackback-proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # Enables HTTP/3 support automatically
+    environment:
+      # Caddy reads your public domain straight from your .env file
+      SITE_DOMAIN: ${BETTER_AUTH_URL:?set BETTER_AUTH_URL (e.g., feedback.yourdomain.com) in .env}
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    command: caddy reverse-proxy --from $SITE_DOMAIN --to app:3000
+    depends_on:
+      app:
+        condition: service_healthy
+
   app:
     image: ghcr.io/quackbackio/quackback:${QUACKBACK_TAG:-latest}
     container_name: quackback-app
     restart: unless-stopped
     init: true
-    # Carries BASE_URL, SECRET_KEY, email settings, S3_BUCKET/S3_REGION, etc.
     env_file: .env
-    # Internal wiring is fixed here (derived from the secrets in .env) so a
-    # self-hoster can't point these at the wrong host — these override env_file.
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:?set POSTGRES_USER in .env}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-quackback}
       REDIS_URL: redis://dragonfly:6379
@@ -44,11 +62,10 @@ services:
       S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}
       S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
       S3_FORCE_PATH_STYLE: 'true'
-      # MinIO has no public port, so the browser can't reach it directly:
-      # serve uploads through the app's /api/storage proxy.
       S3_PROXY: 'true'
-    ports:
-      - '${APP_PORT:-3000}:3000'
+    # ⚠️ REMOVED PUBLISHED HOST PORTS. The app is now safely hidden behind Caddy.
+    expose:
+      - "3000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -57,8 +74,6 @@ services:
       minio-init:
         condition: service_completed_successfully
     healthcheck:
-      # Use Bun (always in the image) so we don't depend on curl/wget. The
-      # container listens on 3000 regardless of the published APP_PORT.
       test:
         [
           'CMD',
@@ -81,11 +96,9 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:-quackback}
-    # No host port — Postgres is reachable only on the internal network.
     volumes:
       - postgres_data:/var/lib/postgresql
       - ./docker/postgres/init-pgcron.sql:/docker-entrypoint-initdb.d/init-pgcron.sql
-    # pg_cron is required for scheduled analytics/materialized-view refreshes.
     command: postgres -c shared_preload_libraries=pg_cron -c cron.database_name=${POSTGRES_DB:-quackback} -c max_connections=200
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
@@ -97,9 +110,7 @@ services:
     image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.27.1
     container_name: quackback-dragonfly
     restart: unless-stopped
-    # BullMQ requires cluster_mode=emulated + lock_on_hashtags for Lua script compatibility.
     command: dragonfly --cluster_mode=emulated --lock_on_hashtags
-    # No host port — reachable only on the internal network.
     volumes:
       - dragonfly_data:/data
     ulimits:
@@ -117,7 +128,6 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
-    # No host port — object storage is internal; uploads are served via the app.
     command: server /data
     volumes:
       - minio_data:/data
@@ -127,9 +137,6 @@ services:
       timeout: 5s
       retries: 5
 
-  # Creates the upload bucket on first start. Unlike the dev stack it does NOT
-  # set a public download policy — the bucket stays private and is served
-  # through the app's /api/storage proxy (S3_PROXY=true above).
   minio-init:
     image: minio/mc:${MC_IMAGE_TAG:-latest}
     container_name: quackback-minio-init
@@ -151,3 +158,5 @@ volumes:
   postgres_data:
   minio_data:
   dragonfly_data:
+  caddy_data:      # Persistent volume for SSL certs so you don't hit Let's Encrypt limits
+  caddy_config:    # Persistent volume for Caddy internal state management
