@@ -39,7 +39,7 @@ services:
       - "443:443/udp" # Enables HTTP/3 support automatically
     environment:
       # Caddy reads your public domain straight from your .env file
-      SITE_DOMAIN: ${BETTER_AUTH_URL:?set BETTER_AUTH_URL (e.g., feedback.yourdomain.com) in .env}
+      SITE_DOMAIN: ${BASE_URL:?set BASE_URL in .env}
     volumes:
       - caddy_data:/data
       - caddy_config:/config
