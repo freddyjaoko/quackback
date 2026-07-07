@@ -43,7 +43,7 @@ services:
     volumes:
       - caddy_data:/data
       - caddy_config:/config
-    command: caddy reverse-proxy --from $SITE_DOMAIN --to app:3000
+    command: sh -c "caddy reverse-proxy --from $$SITE_DOMAIN --to app:3000"
     depends_on:
       app:
         condition: service_healthy
