@@ -9,7 +9,7 @@ import {
   db,
   posts,
   boards,
-  comments,
+  postComments,
   postEditHistory,
   eq,
   and,
@@ -19,7 +19,7 @@ import {
 } from '@/lib/server/db'
 import { type PostId, type PrincipalId, type UserId } from '@quackback/ids'
 import { NotFoundError, ValidationError, ForbiddenError } from '@/lib/shared/errors'
-import { isTeamMember } from '@/lib/shared/roles'
+import { isTeamMember, Role } from '@/lib/shared/roles'
 import { createActivity } from '@/lib/server/domains/activity/activity.service'
 import {
   dispatchPostDeleted,
@@ -66,11 +66,11 @@ async function hasCommentsFromOthers(
 ): Promise<boolean> {
   if (!authorPrincipalId) return false
 
-  const otherComment = await db.query.comments.findFirst({
+  const otherComment = await db.query.postComments.findFirst({
     where: and(
-      eq(comments.postId, postId),
-      sql`${comments.principalId} != ${authorPrincipalId}`,
-      isNull(comments.deletedAt)
+      eq(postComments.postId, postId),
+      sql`${postComments.principalId} != ${authorPrincipalId}`,
+      isNull(postComments.deletedAt)
     ),
   })
 
@@ -80,8 +80,8 @@ async function hasCommentsFromOthers(
 async function getCommentCount(postId: PostId): Promise<number> {
   const result = await db
     .select({ count: sql<number>`count(*)` })
-    .from(comments)
-    .where(and(eq(comments.postId, postId), isNull(comments.deletedAt)))
+    .from(postComments)
+    .where(and(eq(postComments.postId, postId), isNull(postComments.deletedAt)))
 
   return result[0]?.count ?? 0
 }
@@ -102,12 +102,9 @@ async function getCommentCount(postId: PostId): Promise<number> {
 export async function userEditPost(
   postId: PostId,
   input: UserEditPostInput,
-  actor: { principalId: PrincipalId; role: 'admin' | 'member' | 'user' }
+  actor: { principalId: PrincipalId; role: Role }
 ): Promise<Post> {
-  log.info(
-    { post_id: postId, principal_id: actor.principalId, role: actor.role },
-    'user edit post'
-  )
+  log.info({ post_id: postId, principal_id: actor.principalId, role: actor.role }, 'user edit post')
   // Validate input first (no DB needed)
   if (!input.title?.trim()) {
     throw new ValidationError('VALIDATION_ERROR', 'Title is required')
@@ -214,7 +211,7 @@ export async function userEditPost(
  */
 export async function softDeletePost(
   postId: PostId,
-  actor: { principalId: PrincipalId; role: 'admin' | 'member' | 'user'; userId?: UserId }
+  actor: { principalId: PrincipalId; role: Role; userId?: UserId }
 ): Promise<void> {
   log.info(
     { post_id: postId, principal_id: actor.principalId, role: actor.role },

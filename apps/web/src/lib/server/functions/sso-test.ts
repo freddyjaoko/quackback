@@ -24,9 +24,11 @@ import { createHash, randomBytes } from 'node:crypto'
 import { createServerFn } from '@tanstack/react-start'
 import { z } from 'zod'
 import { requireAuth } from './auth-helpers'
+import { PERMISSIONS } from '@/lib/shared/permissions'
 import type { DiagnosticStep, HandshakeStage } from '@/lib/server/auth/sso-test-handshake'
 import type { JsonValue } from '@/lib/server/audit/log'
-import { DEFAULT_OIDC_SCOPES } from '@/lib/server/auth/build-oauth-configs'
+import { authorizeRequestFor } from '@/lib/shared/oidc-request'
+import { allowsMissingEmail } from '@/lib/shared/oidc-claim-mapping'
 import { ssoTestResultKey, ssoTestSessionKey } from '@/lib/shared/sso-test-keys'
 
 const TTL_SECONDS = 600
@@ -37,6 +39,9 @@ type TestSession = {
   nonce: string
   /** The provider registrationId that initiated this test. */
   registrationId: string
+  /** Mirrors the provider's placeholder-address setting so the callback can
+   *  judge a missing email the same way sign-in will. */
+  allowMissingEmail: boolean
   /** Present for discovery providers; absent for manual-endpoint providers. */
   discoveryUrl?: string
   tokenEndpoint: string
@@ -50,6 +55,13 @@ type TestSession = {
   adminUserId: string
   startedAt: number
   codeVerifier: string
+  /** Scopes requested at authorize time. Replayed into the failure hint so an
+   *  invalid_scope names what was actually sent rather than a default set. */
+  requestedScopes: string[]
+  /** Token-endpoint auth method, mirrored from production. */
+  tokenAuth: 'basic' | 'post'
+  /** The prompt sent, replayed into a configuration-error hint. */
+  requestedPrompt?: string
   /** The provider's `detailsChangedAt` at test-start. The callback only stamps
    *  `lastSuccessfulTestAt` when this still matches — so a mid-test edit to the
    *  provider can't let a stale test unlock enforcement for the new config. */
@@ -63,7 +75,7 @@ export type StartSsoTestResult =
 export const startSsoTestFn = createServerFn({ method: 'POST' })
   .validator(z.object({ registrationId: z.string().min(1) }))
   .handler(async ({ data }): Promise<StartSsoTestResult> => {
-    const { user } = await requireAuth({ roles: ['admin'] })
+    const { user } = await requireAuth({ permission: PERMISSIONS.AUTH_MANAGE })
 
     const { listIdentityProviders, getIdentityProviderCredentials } =
       await import('@/lib/server/domains/settings/identity-providers.service')
@@ -156,6 +168,10 @@ export const startSsoTestFn = createServerFn({ method: 'POST' })
     // runs with pkce: true. OAuth 2.1 IdPs reject authorize requests
     // without a code_challenge; IdPs without PKCE support ignore it.
     const codeVerifier = randomBytes(32).toString('base64url')
+    // The SAME builder production reads. Assembling a different request here is
+    // exactly how a passing test came to vouch for a sign-in that fails.
+    const request = authorizeRequestFor(provider)
+    const requestedScopes = request.scopes
     const codeChallenge = createHash('sha256').update(codeVerifier).digest('base64url')
 
     const session: TestSession = {
@@ -163,6 +179,7 @@ export const startSsoTestFn = createServerFn({ method: 'POST' })
       state,
       nonce,
       registrationId: data.registrationId,
+      allowMissingEmail: allowsMissingEmail(provider.claimMapping),
       discoveryUrl: provider.discoveryUrl ?? undefined,
       tokenEndpoint: endpoints.tokenEndpoint,
       jwksUri: endpoints.jwksUri,
@@ -173,6 +190,9 @@ export const startSsoTestFn = createServerFn({ method: 'POST' })
       clientSecret: creds.clientSecret,
       redirectUri,
       codeVerifier,
+      requestedScopes,
+      tokenAuth: request.tokenAuth,
+      requestedPrompt: request.prompt,
       adminUserId: user.id,
       startedAt: Date.now(),
       detailsChangedAt: provider.detailsChangedAt,
@@ -187,14 +207,15 @@ export const startSsoTestFn = createServerFn({ method: 'POST' })
       response_type: 'code',
       client_id: provider.clientId,
       redirect_uri: redirectUri,
-      // Mirror production: buildGenericOAuthConfigs requests provider.scopes
-      // (falling back to the default set). A test that always sent a fixed
-      // scope set could pass while real sign-in requests a different one,
-      // letting a non-representative test unlock enforcement.
-      scope: provider.scopes ?? DEFAULT_OIDC_SCOPES.join(' '),
+      // Mirror production exactly by sharing one resolver with the registration
+      // builder. A test that sent a different scope set could pass while real
+      // sign-in requests another, letting a non-representative test unlock
+      // enforcement — which a stored blank `scopes` used to do, because the two
+      // sides disagreed on whether blank meant "defaults" or "no scopes".
+      scope: requestedScopes.join(' '),
+      ...(request.prompt ? { prompt: request.prompt } : {}),
       state,
       nonce,
-      prompt: 'login',
       code_challenge: codeChallenge,
       code_challenge_method: 'S256',
     })
@@ -254,7 +275,7 @@ export type SsoTestDiagnostic = {
 export const getSsoTestResultFn = createServerFn({ method: 'POST' })
   .validator(z.object({ testId: z.string() }))
   .handler(async ({ data }): Promise<SsoTestDiagnostic | null> => {
-    await requireAuth({ roles: ['admin'] })
+    await requireAuth({ permission: PERMISSIONS.AUTH_MANAGE })
     const { cacheGet } = await import('@/lib/server/redis')
     return (await cacheGet<SsoTestDiagnostic>(ssoTestResultKey(data.testId))) ?? null
   })

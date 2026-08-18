@@ -28,23 +28,27 @@ vi.mock('@/lib/server/redis', () => ({
 }))
 
 // --- DB mock (mappings come from the cache mock, so the select chain is unused) ---
-vi.mock('@/lib/server/db', () => ({
+// Spread the real db module so tables/operators stay current; override only what this suite drives.
+vi.mock('@/lib/server/db', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/server/db')>()),
   db: {
     select: () => ({ from: () => ({ innerJoin: () => ({ where: () => [] }) }) }),
     query: { webhooks: { findMany: vi.fn().mockResolvedValue([]) } },
   },
-  integrations: { id: 'id', integrationType: 'integrationType', secrets: 'secrets', config: 'config', status: 'status' },
-  integrationEventMappings: { integrationId: 'integrationId', eventType: 'eventType', actionConfig: 'actionConfig', filters: 'filters', enabled: 'enabled' },
-  webhooks: { status: 'status', deletedAt: 'deletedAt', $inferSelect: {} },
   eq: vi.fn(),
   and: vi.fn(),
   isNull: vi.fn(),
   inArray: vi.fn(),
-  principal: {},
 }))
 
 vi.mock('@/lib/server/integrations/encryption', () => ({
   decryptSecrets: vi.fn((s: string) => JSON.parse(s)),
+}))
+vi.mock('@/lib/server/integrations/jira/access-token', () => ({
+  getJiraAccessToken: vi.fn(async (integration: { secrets: unknown }) => {
+    const parsed = JSON.parse(integration.secrets as string) as { accessToken?: string }
+    return parsed.accessToken
+  }),
 }))
 vi.mock('@/lib/server/domains/webhooks/encryption', () => ({
   decryptWebhookSecret: vi.fn((s: string) => s),
@@ -79,7 +83,10 @@ const { listIntegrationTypes, getIntegrationHook } = await import('@/lib/server/
  * Enrichment hooks that store NO channelId at connect time are listed in
  * KNOWN_UNRESOLVED below, not here — do not fabricate a channelId for them.
  */
-const CONNECTED_FIXTURES: Record<string, { integrationConfig?: Record<string, unknown>; actionConfig?: Record<string, unknown> }> = {
+const CONNECTED_FIXTURES: Record<
+  string,
+  { integrationConfig?: Record<string, unknown>; actionConfig?: Record<string, unknown> }
+> = {
   slack: { actionConfig: { channelId: 'C1' } },
   discord: { actionConfig: { channelId: 'C1' } },
   teams: { integrationConfig: { channelId: 'C1' } },
@@ -169,9 +176,15 @@ describe('integration target coverage', () => {
   })
 
   it.each(resolvingTypes)('resolves a delivery target for "%s" when connected', async (type) => {
-    mockCacheGet
-      .mockResolvedValueOnce([mappingRow(type, CONNECTED_FIXTURES[type] ?? {})]) // INTEGRATION_MAPPINGS
-      .mockResolvedValueOnce([]) // ACTIVE_WEBHOOKS
+    // Key-based (not call-order): the resolver registry runs sinks concurrently,
+    // so a mockResolvedValueOnce sequence is non-deterministic. Match on the key.
+    mockCacheGet.mockImplementation((key: string) =>
+      Promise.resolve(
+        key === 'hooks:integration-mappings'
+          ? [mappingRow(type, CONNECTED_FIXTURES[type] ?? {})]
+          : []
+      )
+    )
 
     const targets = await getHookTargets(makePostCreatedEvent())
     expect(targets.filter((t) => t.type === type).length).toBeGreaterThan(0)
@@ -183,9 +196,9 @@ describe('integration target coverage', () => {
   it.each([...KNOWN_UNRESOLVED])(
     'does NOT yet resolve a target for known-gap enrichment hook "%s"',
     async (type) => {
-      mockCacheGet
-        .mockResolvedValueOnce([mappingRow(type, {})]) // no channelId, as in production
-        .mockResolvedValueOnce([]) // ACTIVE_WEBHOOKS
+      mockCacheGet.mockImplementation((key: string) =>
+        Promise.resolve(key === 'hooks:integration-mappings' ? [mappingRow(type, {})] : [])
+      )
 
       const targets = await getHookTargets(makePostCreatedEvent())
       expect(targets.filter((t) => t.type === type)).toHaveLength(0)

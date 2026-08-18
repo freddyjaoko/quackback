@@ -28,6 +28,9 @@ function skipIfNoServer() {
 describe.skipIf(SKIP_INTEGRATION)('API Integration Tests', () => {
   beforeAll(async () => {
     state.serverAvailable = await checkServerAndSetup(state)
+    if (!state.serverAvailable && process.env.REQUIRE_LIVE_API === 'true') {
+      throw new Error('Live API test server is unavailable')
+    }
   })
 
   afterAll(async () => {
@@ -300,7 +303,7 @@ describe.skipIf(SKIP_INTEGRATION)('API Integration Tests', () => {
       if (skipIfNoServer() || !state.testBoardId) return
 
       const { createId } = await import('@quackback/ids')
-      const fakeStatusId = createId('status')
+      const fakeStatusId = createId('post_status')
       const { status } = await api('POST', '/posts', {
         boardId: state.testBoardId,
         title: 'Test',

@@ -43,6 +43,23 @@ export interface HandshakeInput {
   redirectUri: string
   /** PKCE verifier minted at authorize time (S256 challenge). */
   codeVerifier: string
+  /** The scopes this attempt actually requested, so an invalid_scope hint can
+   *  name them instead of asserting a default set. */
+  requestedScopes?: readonly string[]
+  /** How to authenticate at the token endpoint. Mirrors production, which is
+   *  the point: a test using the other method proves nothing about sign-in. */
+  tokenAuth?: 'basic' | 'post'
+  /** The `prompt` this attempt sent, so a configuration error can name it. */
+  requestedPrompt?: string
+  /**
+   * Whether this provider is configured to mint a placeholder address when the
+   * IdP releases none. The test has to know, because sign-in does: with it on,
+   * a provider that releases no email signs people in perfectly well, and a
+   * test that failed anyway would report a broken connection for a working
+   * configuration — and block enforcement, which a passing test is what
+   * unlocks.
+   */
+  allowMissingEmail?: boolean
   /** IdP-returned `error` query parameter, if the authorize step failed. */
   idpError?: string | null
   idpErrorDescription?: string | null
@@ -97,7 +114,12 @@ export async function runHandshake(input: HandshakeInput): Promise<HandshakeResu
       ok: false,
       stage: 'idp-authorize',
       errorCode: input.idpError,
-      hint: explainAuthorizeError(input.idpError, input.idpErrorDescription),
+      hint: explainAuthorizeError(
+        input.idpError,
+        input.idpErrorDescription,
+        input.requestedScopes,
+        input.requestedPrompt
+      ),
       steps,
     }
   }
@@ -195,19 +217,33 @@ export async function runHandshake(input: HandshakeInput): Promise<HandshakeResu
   // pkce: true in our config, so the test flow sends code_verifier
   // too. Diverging here would test a slightly-different protocol and
   // produce false positives.
+  // Basic sends the credentials in the Authorization header rather than the
+  // body. Some providers accept only one of the two, so this follows whatever
+  // production is configured to send.
+  const useBasic = input.tokenAuth === 'basic'
   const tokenBody = new URLSearchParams({
     grant_type: 'authorization_code',
     code_verifier: input.codeVerifier,
     code: input.code,
     redirect_uri: input.redirectUri,
-    client_id: input.clientId,
-    client_secret: input.clientSecret,
+    ...(useBasic ? {} : { client_id: input.clientId, client_secret: input.clientSecret }),
   })
+  const basicHeader: Record<string, string> = useBasic
+    ? {
+        Authorization: `Basic ${Buffer.from(
+          `${encodeURIComponent(input.clientId)}:${encodeURIComponent(input.clientSecret)}`
+        ).toString('base64')}`,
+      }
+    : {}
   let tokenRes: Response
   try {
     tokenRes = await safeFetch(discovery.token_endpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Accept: 'application/json',
+        ...basicHeader,
+      },
       body: tokenBody.toString(),
       timeoutMs: 10_000,
     })
@@ -348,35 +384,98 @@ export async function runHandshake(input: HandshakeInput): Promise<HandshakeResu
     }
   }
 
-  if (!verifiedPayload.email) {
+  // Identity comes from THE resolver — the same one production sign-in uses.
+  // Demanding an email inside the ID token here is what made a provider that
+  // releases the address at userinfo sign users in successfully while failing
+  // the very test that gates enforcement.
+  const { resolveIdentity } = await import('./resolve-identity')
+  const resolution = await resolveIdentity({
+    tokens: { idToken: tokens.id_token, accessToken: tokens.access_token },
+    fetchUserInfo: async () => {
+      if (!discovery.userinfo_endpoint || !tokens.access_token) return null
+      try {
+        const uiRes = await safeFetch(discovery.userinfo_endpoint, {
+          headers: { Authorization: `Bearer ${tokens.access_token}` },
+          timeoutMs: 5000,
+        })
+        if (!uiRes.ok) {
+          steps.push({
+            ok: false,
+            stage: 'userinfo',
+            label: `Userinfo failed (${uiRes.status})`,
+          })
+          return null
+        }
+        steps.push({ ok: true, stage: 'userinfo', label: 'Userinfo endpoint reachable' })
+        const body: unknown = await uiRes.json()
+        return body !== null && typeof body === 'object' ? (body as Record<string, unknown>) : null
+      } catch {
+        steps.push({
+          ok: false,
+          stage: 'userinfo',
+          label: 'Userinfo unreachable or unsafe to fetch',
+        })
+        return null
+      }
+    },
+  })
+
+  if (!resolution.ok) {
     return {
       ok: false,
       stage: 'claim-check',
-      hint: "ID token has no 'email' claim. Quackback requires an email to create users. Configure your IdP's claim mapper to release the email claim (Keycloak: client scopes; Okta: claim mappers; Entra: API permissions + admin consent).",
+      hint:
+        resolution.reason === 'subject_mismatch'
+          ? "Your IdP's userinfo endpoint reported a different 'sub' than its ID token. OIDC requires these to match, and mixing them could attach the wrong account, so sign-in is refused. This usually means a token or session mix-up at the IdP."
+          : "Couldn't resolve an account identifier. The IdP must return a stable 'sub' in the ID token or from its userinfo endpoint.",
       steps,
     }
   }
-  steps.push({
-    ok: true,
-    stage: 'claim-check',
-    label: 'Email claim present',
-    detail: typeof verifiedPayload.email === 'string' ? verifiedPayload.email : undefined,
-  })
 
-  if (discovery.userinfo_endpoint && tokens.access_token) {
-    try {
-      const uiRes = await safeFetch(discovery.userinfo_endpoint, {
-        headers: { Authorization: `Bearer ${tokens.access_token}` },
-        timeoutMs: 5000,
-      })
-      steps.push({
-        ok: uiRes.ok,
-        stage: 'userinfo',
-        label: uiRes.ok ? 'Userinfo endpoint reachable' : `Userinfo failed (${uiRes.status})`,
-      })
-    } catch {
-      steps.push({ ok: false, stage: 'userinfo', label: 'Userinfo unreachable or unsafe to fetch' })
+  const { identity } = resolution
+  // Per-field provenance: this is what makes a userinfo-sourced address legible
+  // instead of looking like a failure.
+  for (const field of ['id', 'email', 'name'] as const) {
+    const source = identity.sources[field]
+    if (!source) continue
+    steps.push({
+      ok: true,
+      stage: 'claim-check',
+      label: `${field === 'id' ? 'Account identifier' : field === 'email' ? 'Email address' : 'Display name'} resolved`,
+      detail: source === 'idToken' ? 'from the ID token' : `from ${source}`,
+    })
+  }
+
+  // Observed, not enforced. Surfacing it here is how an admin learns about the
+  // discrepancy while sign-in still works, rather than discovering it on the
+  // release that starts refusing.
+  if (identity.warnings?.includes('subject_mismatch')) {
+    steps.push({
+      ok: false,
+      stage: 'claim-check',
+      label: 'Subject mismatch between ID token and userinfo',
+      detail:
+        'OIDC requires these to agree. Sign-in still works today, but a future release will refuse it — raise this with your IdP.',
+    })
+  }
+
+  if (!identity.email) {
+    if (!input.allowMissingEmail) {
+      return {
+        ok: false,
+        stage: 'claim-check',
+        hint: "No email address was released, in the ID token or from the userinfo endpoint. Quackback needs one to create the account. Either configure your IdP's claim mapper to release it, or — if this provider has no email addresses to give — enable the placeholder-address option on the provider.",
+        steps,
+      }
     }
+    // Configured for exactly this, so the connection is sound. Say plainly what
+    // signing in will produce rather than reporting a bare success: these
+    // accounts cannot receive email until the person supplies an address.
+    steps.push({
+      ok: true,
+      stage: 'claim-check',
+      label: 'No email released — a placeholder address will be created',
+    })
   }
 
   return {
@@ -386,9 +485,9 @@ export async function runHandshake(input: HandshakeInput): Promise<HandshakeResu
       iss: verifiedPayload.iss as string,
       sub: verifiedPayload.sub as string,
       aud: verifiedPayload.aud as string | string[],
-      email: verifiedPayload.email as string,
-      email_verified: verifiedPayload.email_verified as boolean | undefined,
-      name: verifiedPayload.name as string | undefined,
+      email: identity.email,
+      email_verified: identity.emailVerified,
+      name: identity.name,
       preferred_username: verifiedPayload.preferred_username as string | undefined,
     },
     tokenInfo: {

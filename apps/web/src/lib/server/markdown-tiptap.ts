@@ -21,6 +21,7 @@ import TableHeader from '@tiptap/extension-table-header'
 import type { TiptapContent } from '@/lib/server/db'
 import type { JSONContent } from '@tiptap/core'
 import { sanitizeTiptapContent } from '@/lib/server/sanitize-tiptap'
+import { lookupEmoji } from '@/lib/shared/content-emoji'
 
 /**
  * Server-safe extensions for markdown conversion.
@@ -107,7 +108,11 @@ const RESERIALIZABLE_NODE_TYPES = new Set([
   'tableHeader',
   'image',
   'resizableImage',
+  'chatImage',
   'mention',
+  'emoji',
+  'youtube',
+  'quackbackEmbed',
 ])
 
 /**
@@ -138,6 +143,24 @@ export function contentJsonToMarkdown(
   try {
     const markdown = tiptapJsonToMarkdown(normalizeForMarkdown(contentJson))
     return markdown.trim() ? markdown : fallback
+  } catch {
+    return fallback
+  }
+}
+
+/**
+ * Produce the stored markdown projection for a freshly written contentJson
+ * document. Unlike {@link contentJsonToMarkdown}, this always serializes the
+ * current tree, including image-free structured-only edits, so the denormalized
+ * `content` column cannot retain text from the previous version.
+ */
+export function projectContentJsonToMarkdown(
+  contentJson: TiptapContent | JSONContent | null | undefined,
+  fallback: string
+): string {
+  if (!contentJson || !isReserializable(contentJson)) return fallback
+  try {
+    return tiptapJsonToMarkdown(normalizeForMarkdown(contentJson)).trim()
   } catch {
     return fallback
   }
@@ -175,7 +198,31 @@ function normalizeForMarkdown(node: JSONContent): JSONContent {
     const label = (attrs.label as string) || (attrs.id as string) || 'mention'
     return { type: 'text', text: `@${label}` }
   }
-  const next = node.type === 'resizableImage' ? { ...node, type: 'image' } : node
+  if (node.type === 'emoji') {
+    const attrs = node.attrs ?? {}
+    const name = String(attrs.name ?? '')
+    const emoji = String(attrs.emoji ?? lookupEmoji(name)?.emoji ?? (name ? `:${name}:` : ''))
+    return { type: 'text', text: emoji }
+  }
+  if (node.type === 'youtube') {
+    const src = String(node.attrs?.src ?? '')
+    return {
+      type: 'paragraph',
+      content: src
+        ? [{ type: 'text', text: src, marks: [{ type: 'link', attrs: { href: src } }] }]
+        : [{ type: 'text', text: '[YouTube embed]' }],
+    }
+  }
+  if (node.type === 'quackbackEmbed') {
+    const kind = String(node.attrs?.kind ?? 'content')
+    const id = String(node.attrs?.id ?? '')
+    return {
+      type: 'paragraph',
+      content: [{ type: 'text', text: id ? `[Embedded ${kind}: ${id}]` : `[Embedded ${kind}]` }],
+    }
+  }
+  const next =
+    node.type === 'resizableImage' || node.type === 'chatImage' ? { ...node, type: 'image' } : node
   if (!Array.isArray(next.content)) return next
   return { ...next, content: next.content.map(normalizeForMarkdown) }
 }
@@ -206,4 +253,76 @@ const commentManager = new MarkdownManager({
 export function commentMarkdownToTiptapJson(markdown: string): TiptapContent {
   const json = commentManager.parse(markdown) as TiptapContent
   return sanitizeTiptapContent(json) as TiptapContent
+}
+
+/**
+ * Inline node types whose text concatenates directly into their parent run
+ * (a paragraph's words, a hard break, a mention). Anything else is a
+ * block-level node whose siblings read as separate lines.
+ */
+const INLINE_LEAF_TYPES = new Set(['text', 'hardBreak', 'mention', 'emoji'])
+
+/**
+ * Image node types rendered as a `[image]` placeholder by {@link tiptapJsonToText}:
+ * the chat composer's inline `chatImage` plus the two image nodes documents
+ * elsewhere store (see {@link IMAGE_NODE_TYPES} above).
+ */
+const TEXT_PLACEHOLDER_IMAGE_TYPES = new Set(['chatImage', 'image', 'resizableImage'])
+
+/**
+ * A node's own text, for the leaf types {@link tiptapJsonToText} renders
+ * directly. Returns `null` for a container node, whose text instead comes
+ * from walking its `content` children.
+ */
+function leafText(node: TiptapContent): string | null {
+  if (node.type === 'text') return node.text ?? ''
+  if (node.type === 'hardBreak') return '\n'
+  if (node.type === 'mention') {
+    const attrs = node.attrs ?? {}
+    const label = (attrs.label as string) || (attrs.id as string) || 'mention'
+    return `@${label}`
+  }
+  if (TEXT_PLACEHOLDER_IMAGE_TYPES.has(node.type)) return '[image]'
+  return null
+}
+
+/**
+ * Depth-first walk producing one node's plaintext. A container's children
+ * are joined with no separator when they're all inline (a paragraph's words)
+ * and with `\n` otherwise (a doc's paragraphs, a list's items, …) — mirroring
+ * how a document reads line by line.
+ */
+function walkText(node: TiptapContent): string {
+  const leaf = leafText(node)
+  if (leaf !== null) return leaf
+  const children = node.content ?? []
+  if (children.length === 0) return ''
+  const separator = children.every((child) => INLINE_LEAF_TYPES.has(child.type)) ? '' : '\n'
+  return children.map(walkText).join(separator)
+}
+
+/**
+ * Derive plaintext from a TipTap doc via a pure JSON-tree walk (no tiptap
+ * manager/extensions needed). Used server-side to keep the `content` mirror
+ * column (FTS/transcripts/previews) faithful when a caller sends a rich
+ * `contentJson` with a blank `content` — mirroring what the client's own
+ * `editor.getText()` would have produced.
+ */
+export function tiptapJsonToText(json: TiptapContent): string {
+  return walkText(json).trim()
+}
+
+/**
+ * True when a doc contains at least one non-empty `text` leaf anywhere in
+ * the tree. Callers use this to gate {@link tiptapJsonToText}: an image- or
+ * embed-only doc (no text leaves) has nothing meaningful to derive, so a
+ * caller should keep its existing fallback-label behavior instead.
+ */
+export function hasTextLeaf(json: TiptapContent | null | undefined): boolean {
+  if (!json) return false
+  const visit = (node: TiptapContent): boolean => {
+    if (node.type === 'text') return !!node.text?.trim()
+    return (node.content ?? []).some(visit)
+  }
+  return visit(json)
 }

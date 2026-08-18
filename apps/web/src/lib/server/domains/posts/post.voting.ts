@@ -7,7 +7,7 @@
 import {
   db,
   posts,
-  votes,
+  postVotes,
   postSubscriptions,
   boards,
   principal,
@@ -17,11 +17,15 @@ import {
   and,
   desc,
 } from '@/lib/server/db'
-import { createId, toUuid, type PostId, type PrincipalId } from '@quackback/ids'
+import { createId, toUuid, type PostId, type PostVoteId, type PrincipalId } from '@quackback/ids'
 import { getExecuteRows } from '@/lib/server/utils'
 import { NotFoundError } from '@/lib/shared/errors'
 import { realEmail } from '@/lib/shared/anonymous-email'
+import { logger } from '@/lib/server/logger'
+import { dispatchPostVoted } from '@/lib/server/events/dispatch'
 import type { VoteResult } from './post.types'
+
+const log = logger.child({ component: 'post-voting' })
 import {
   levelFromFlags,
   type SubscriptionLevel,
@@ -41,6 +45,61 @@ export interface VoterInfo {
 }
 
 /**
+ * Emit the post.voted event for a freshly cast vote: one indexed lookup for
+ * the post ref (title/board slug) joined to the voter's identity, then the
+ * usual best-effort dispatch. Anonymous voters contribute no identity — the
+ * synthetic placeholder email is stripped here, never on the payload. Best
+ * effort end to end: a lookup or dispatch failure is logged and dropped,
+ * never fails the vote itself (dispatchEvent already swallows its own
+ * failures; this catch covers the lookup).
+ */
+async function emitPostVotedEvent(
+  postId: PostId,
+  principalId: PrincipalId,
+  voteCount: number
+): Promise<void> {
+  try {
+    const [row] = await db
+      .select({
+        title: posts.title,
+        boardId: posts.boardId,
+        boardSlug: boards.slug,
+        voterName: principal.displayName,
+        voterEmail: user.email,
+        voterType: principal.type,
+      })
+      .from(posts)
+      .innerJoin(boards, eq(boards.id, posts.boardId))
+      .leftJoin(principal, eq(principal.id, principalId))
+      .leftJoin(user, eq(user.id, principal.userId))
+      .where(eq(posts.id, postId))
+      .limit(1)
+    if (!row) return
+
+    const isAnonymous = row.voterType === 'anonymous'
+    await dispatchPostVoted(
+      {
+        type: 'user',
+        principalId,
+        email: isAnonymous ? undefined : (realEmail(row.voterEmail) ?? undefined),
+        displayName: isAnonymous ? undefined : (row.voterName ?? undefined),
+      },
+      {
+        id: postId,
+        title: row.title,
+        boardId: row.boardId,
+        boardSlug: row.boardSlug,
+        voterEmail: isAnonymous ? null : realEmail(row.voterEmail),
+        voterName: isAnonymous ? null : row.voterName,
+        voteCount,
+      }
+    )
+  } catch (error) {
+    log.error({ err: error, postId }, 'post.voted event emission failed, dropping')
+  }
+}
+
+/**
  * Toggle vote on a post
  *
  * If the user has already voted, removes the vote.
@@ -56,7 +115,7 @@ export interface VoterInfo {
 export async function voteOnPost(postId: PostId, principalId: PrincipalId): Promise<VoteResult> {
   const postUuid = toUuid(postId)
   const principalUuid = toUuid(principalId)
-  const voteId = toUuid(createId('vote'))
+  const voteId = toUuid(createId('post_vote'))
   const subscriptionId = toUuid(createId('post_subscription'))
 
   // Single atomic CTE: validate post/board, toggle vote, update count, auto-subscribe
@@ -77,16 +136,18 @@ export async function voteOnPost(postId: PostId, principalId: PrincipalId): Prom
         AND deleted_at IS NULL
     ),
     existing AS (
-      SELECT id FROM ${votes}
+      SELECT id FROM ${postVotes}
       WHERE post_id = ${postUuid}::uuid AND principal_id = ${principalUuid}::uuid
     ),
     deleted AS (
-      DELETE FROM ${votes}
+      DELETE FROM ${postVotes}
       WHERE id IN (SELECT id FROM existing)
+        AND EXISTS (SELECT 1 FROM post_check)
+        AND EXISTS (SELECT 1 FROM board_check)
       RETURNING id
     ),
     inserted AS (
-      INSERT INTO ${votes} (id, post_id, principal_id, updated_at)
+      INSERT INTO ${postVotes} (id, post_id, principal_id, updated_at)
       SELECT ${voteId}::uuid, ${postUuid}::uuid, ${principalUuid}::uuid, NOW()
       WHERE NOT EXISTS (SELECT 1 FROM existing)
         AND EXISTS (SELECT 1 FROM post_check)
@@ -147,6 +208,12 @@ export async function voteOnPost(postId: PostId, principalId: PrincipalId): Prom
   const voted = row.newly_voted
   const voteCount = row.vote_count ?? 0
 
+  // post.voted fires only on the insert half of the toggle — an unvote is
+  // not a "vote cast" and must not notify subscribed endpoints.
+  if (voted) {
+    await emitPostVotedEvent(postId, principalId, voteCount)
+  }
+
   return { voted, voteCount }
 }
 
@@ -166,18 +233,16 @@ export async function addVoteOnBehalf(
   postId: PostId,
   principalId: PrincipalId,
   source?: { type: string; externalUrl: string },
-  feedbackSuggestionId?: string | null,
   addedByPrincipalId?: PrincipalId,
   createdAt?: Date
 ): Promise<VoteResult> {
   const postUuid = toUuid(postId)
   const principalUuid = toUuid(principalId)
-  const voteId = toUuid(createId('vote'))
+  const voteId = toUuid(createId('post_vote'))
   const subscriptionId = toUuid(createId('post_subscription'))
 
   const sourceType = source?.type ?? null
   const sourceExternalUrl = source?.externalUrl ?? null
-  const suggestionUuid = feedbackSuggestionId ? toUuid(feedbackSuggestionId) : null
   const addedByUuid = addedByPrincipalId ? toUuid(addedByPrincipalId) : null
   const createdAtSql = createdAt ? sql`${createdAt.toISOString()}::timestamptz` : sql`NOW()`
 
@@ -198,8 +263,8 @@ export async function addVoteOnBehalf(
         AND deleted_at IS NULL
     ),
     inserted AS (
-      INSERT INTO ${votes} (id, post_id, principal_id, source_type, source_external_url, feedback_suggestion_id, added_by_principal_id, created_at, updated_at)
-      SELECT ${voteId}::uuid, ${postUuid}::uuid, ${principalUuid}::uuid, ${sourceType}, ${sourceExternalUrl}, ${suggestionUuid}::uuid, ${addedByUuid}::uuid, ${createdAtSql}, ${createdAtSql}
+      INSERT INTO ${postVotes} (id, post_id, principal_id, source_type, source_external_url, added_by_principal_id, created_at, updated_at)
+      SELECT ${voteId}::uuid, ${postUuid}::uuid, ${principalUuid}::uuid, ${sourceType}, ${sourceExternalUrl}, ${addedByUuid}::uuid, ${createdAtSql}, ${createdAtSql}
       WHERE EXISTS (SELECT 1 FROM post_check)
         AND EXISTS (SELECT 1 FROM board_check)
       ON CONFLICT (post_id, principal_id) DO NOTHING
@@ -265,18 +330,25 @@ export async function removeVote(
 
   const result = await db.execute<{
     post_exists: boolean
+    board_exists: boolean
     deleted: boolean
     vote_count: number
   }>(sql`
     WITH post_check AS (
-      SELECT id, vote_count FROM ${posts}
+      SELECT id, board_id, vote_count FROM ${posts}
       WHERE id = ${postUuid}::uuid AND deleted_at IS NULL
     ),
+    board_check AS (
+      SELECT 1 FROM ${boards}
+      WHERE id = (SELECT board_id FROM post_check)
+        AND deleted_at IS NULL
+    ),
     deleted AS (
-      DELETE FROM ${votes}
+      DELETE FROM ${postVotes}
       WHERE post_id = ${postUuid}::uuid
         AND principal_id = ${principalUuid}::uuid
         AND EXISTS (SELECT 1 FROM post_check)
+        AND EXISTS (SELECT 1 FROM board_check)
       RETURNING id
     ),
     updated_post AS (
@@ -288,12 +360,14 @@ export async function removeVote(
     )
     SELECT
       EXISTS(SELECT 1 FROM post_check) as post_exists,
+      EXISTS(SELECT 1 FROM board_check) as board_exists,
       EXISTS(SELECT 1 FROM deleted) as deleted,
       COALESCE((SELECT vote_count FROM updated_post), (SELECT vote_count FROM post_check), 0) as vote_count
   `)
 
   type RemoveVoteRow = {
     post_exists: boolean
+    board_exists: boolean
     deleted: boolean
     vote_count: number
   }
@@ -304,7 +378,121 @@ export async function removeVote(
     throw new NotFoundError('POST_NOT_FOUND', `Post with ID ${postId} not found`)
   }
 
+  if (!row?.board_exists) {
+    throw new NotFoundError('BOARD_NOT_FOUND', `Board not found for post ${postId}`)
+  }
+
   return { removed: row.deleted, voteCount: row.vote_count ?? 0 }
+}
+
+export interface ListPostVotersResult {
+  items: VoterInfo[]
+  nextCursor: PostVoteId | null
+  hasMore: boolean
+}
+
+/**
+ * List the voters on a post, newest votes first, with optional keyset
+ * pagination. The cursor is a vote ID; the page continues strictly after that
+ * vote in (createdAt, id) order. A cursor that no longer resolves is ignored
+ * rather than erroring, matching the inbox listing. When no limit is given
+ * the full list is returned and hasMore is always false.
+ */
+export async function listPostVoters(
+  postId: PostId,
+  options: { limit?: number; cursor?: PostVoteId } = {}
+): Promise<ListPostVotersResult> {
+  const { limit, cursor } = options
+
+  const conditions = [eq(postVotes.postId, postId)]
+  if (cursor) {
+    const cursorVote = await db.query.postVotes.findFirst({
+      where: eq(postVotes.id, cursor),
+      columns: { id: true, createdAt: true },
+    })
+    if (cursorVote) {
+      conditions.push(
+        sql`(${postVotes.createdAt}, ${postVotes.id}) < (${cursorVote.createdAt.toISOString()}, ${toUuid(cursorVote.id)}::uuid)`
+      )
+    }
+  }
+
+  const query = db
+    .select({
+      voteId: postVotes.id,
+      principalId: principal.id,
+      displayName: principal.displayName,
+      email: user.email,
+      avatarUrl: principal.avatarUrl,
+      principalType: principal.type,
+      sourceType: postVotes.sourceType,
+      sourceExternalUrl: postVotes.sourceExternalUrl,
+      addedByName: sql<string | null>`(
+        SELECT p2.display_name FROM ${principal} p2
+        WHERE p2.id = ${postVotes.addedByPrincipalId}
+      )`.as('added_by_name'),
+      createdAt: postVotes.createdAt,
+      notifyComments: postSubscriptions.notifyComments,
+      notifyStatusChanges: postSubscriptions.notifyStatusChanges,
+    })
+    .from(postVotes)
+    .innerJoin(principal, eq(principal.id, postVotes.principalId))
+    .leftJoin(user, eq(user.id, principal.userId))
+    .leftJoin(
+      postSubscriptions,
+      and(
+        eq(postSubscriptions.postId, postVotes.postId),
+        eq(postSubscriptions.principalId, postVotes.principalId)
+      )
+    )
+    .where(and(...conditions))
+    // Secondary id key keeps the order total so pages never overlap on ties.
+    .orderBy(desc(postVotes.createdAt), desc(postVotes.id))
+    .$dynamic()
+
+  const rows = limit !== undefined ? await query.limit(limit + 1) : await query
+
+  const hasMore = limit !== undefined && rows.length > limit
+  const pageRows = hasMore ? rows.slice(0, limit) : rows
+
+  return {
+    items: pageRows.map(mapVoterRow),
+    nextCursor: hasMore ? pageRows[pageRows.length - 1].voteId : null,
+    hasMore,
+  }
+}
+
+type VoterRow = {
+  principalId: PrincipalId
+  displayName: string | null
+  email: string | null
+  avatarUrl: string | null
+  principalType: string
+  sourceType: string | null
+  sourceExternalUrl: string | null
+  addedByName: string | null
+  createdAt: Date
+  notifyComments: boolean | null
+  notifyStatusChanges: boolean | null
+}
+
+function mapVoterRow(row: VoterRow): VoterInfo {
+  const isAnonymous = row.principalType === 'anonymous'
+  return {
+    principalId: row.principalId,
+    displayName: isAnonymous ? null : row.displayName,
+    // Anonymous voters carry the synthetic placeholder email — never expose it.
+    email: realEmail(row.email),
+    avatarUrl: isAnonymous ? null : row.avatarUrl,
+    isAnonymous,
+    sourceType: row.sourceType,
+    sourceExternalUrl: row.sourceExternalUrl,
+    addedByName: row.addedByName,
+    createdAt: row.createdAt,
+    subscriptionLevel: isAnonymous
+      ? ('none' as const)
+      : levelFromFlags(row.notifyComments ?? false, row.notifyStatusChanges ?? false),
+  }
 }
 
 /**
@@ -312,52 +500,6 @@ export async function removeVote(
  * Returns newest votes first.
  */
 export async function getPostVoters(postId: PostId): Promise<VoterInfo[]> {
-  const rows = await db
-    .select({
-      principalId: principal.id,
-      displayName: principal.displayName,
-      email: user.email,
-      avatarUrl: principal.avatarUrl,
-      principalType: principal.type,
-      sourceType: votes.sourceType,
-      sourceExternalUrl: votes.sourceExternalUrl,
-      addedByName: sql<string | null>`(
-        SELECT p2.display_name FROM ${principal} p2
-        WHERE p2.id = ${votes.addedByPrincipalId}
-      )`.as('added_by_name'),
-      createdAt: votes.createdAt,
-      notifyComments: postSubscriptions.notifyComments,
-      notifyStatusChanges: postSubscriptions.notifyStatusChanges,
-    })
-    .from(votes)
-    .innerJoin(principal, eq(principal.id, votes.principalId))
-    .leftJoin(user, eq(user.id, principal.userId))
-    .leftJoin(
-      postSubscriptions,
-      and(
-        eq(postSubscriptions.postId, votes.postId),
-        eq(postSubscriptions.principalId, votes.principalId)
-      )
-    )
-    .where(eq(votes.postId, postId))
-    .orderBy(desc(votes.createdAt))
-
-  return rows.map((row) => {
-    const isAnonymous = row.principalType === 'anonymous'
-    return {
-      principalId: row.principalId,
-      displayName: isAnonymous ? null : row.displayName,
-      // Anonymous voters carry the synthetic placeholder email — never expose it.
-      email: realEmail(row.email),
-      avatarUrl: isAnonymous ? null : row.avatarUrl,
-      isAnonymous,
-      sourceType: row.sourceType,
-      sourceExternalUrl: row.sourceExternalUrl,
-      addedByName: row.addedByName,
-      createdAt: row.createdAt,
-      subscriptionLevel: isAnonymous
-        ? ('none' as const)
-        : levelFromFlags(row.notifyComments ?? false, row.notifyStatusChanges ?? false),
-    }
-  })
+  const { items } = await listPostVoters(postId)
+  return items
 }

@@ -34,7 +34,9 @@ const mockInnerJoin = vi.fn()
 const mockDbWhere = vi.fn()
 const mockFindMany = vi.fn()
 
-vi.mock('@/lib/server/db', () => ({
+vi.mock('@/lib/server/db', async (importOriginal) => ({
+  // Spread the real db module so tables/operators stay current; override only what this suite drives.
+  ...(await importOriginal<typeof import('@/lib/server/db')>()),
   db: {
     select: (...args: unknown[]) => mockSelect(...args),
     query: {
@@ -43,35 +45,22 @@ vi.mock('@/lib/server/db', () => ({
       },
     },
   },
-  integrations: {
-    id: 'id',
-    integrationType: 'integrationType',
-    secrets: 'secrets',
-    config: 'config',
-    status: 'status',
-  },
-  integrationEventMappings: {
-    integrationId: 'integrationId',
-    eventType: 'eventType',
-    actionConfig: 'actionConfig',
-    filters: 'filters',
-    enabled: 'enabled',
-  },
-  webhooks: {
-    status: 'status',
-    deletedAt: 'deletedAt',
-    $inferSelect: {},
-  },
   eq: vi.fn(),
   and: vi.fn(),
   isNull: vi.fn(),
   inArray: vi.fn(),
-  principal: {},
 }))
 
 // --- Other mocks ---
 vi.mock('@/lib/server/integrations/encryption', () => ({
   decryptSecrets: vi.fn((s: string) => JSON.parse(s)),
+}))
+
+vi.mock('@/lib/server/integrations/jira/access-token', () => ({
+  getJiraAccessToken: vi.fn(async (integration: { secrets: unknown }) => {
+    const parsed = JSON.parse(integration.secrets as string) as { accessToken?: string }
+    return parsed.accessToken
+  }),
 }))
 
 vi.mock('@/lib/server/domains/webhooks/encryption', () => ({
@@ -108,6 +97,21 @@ beforeEach(() => {
   mockCacheGet.mockResolvedValue(null)
   mockCacheSet.mockResolvedValue(undefined)
 })
+
+// Key-based cacheGet mock. The resolver registry runs sinks CONCURRENTLY, so
+// call-order (mockResolvedValueOnce) mocks are non-deterministic; match on the
+// cache key instead. `undefined` for a response means "cache miss" (null).
+function cacheByKey(opts: { mappings?: unknown; webhooks?: unknown }) {
+  mockCacheGet.mockImplementation((key: string) =>
+    Promise.resolve(
+      key === 'hooks:integration-mappings'
+        ? (opts.mappings ?? null)
+        : key === 'hooks:webhooks-active'
+          ? (opts.webhooks ?? null)
+          : null
+    )
+  )
+}
 
 // Helper: set up the DB chain for integration mappings
 function setupIntegrationDbChain(rows: unknown[]) {
@@ -154,16 +158,20 @@ describe('integration mapping caching', () => {
     ]
 
     // First call returns null (integration mappings), second returns null (webhooks)
-    mockCacheGet
-      .mockResolvedValueOnce(cachedMappings) // INTEGRATION_MAPPINGS
-      .mockResolvedValueOnce([]) // ACTIVE_WEBHOOKS
+    cacheByKey({ mappings: cachedMappings, webhooks: [] })
 
     const targets = await getHookTargets(makePostCreatedEvent())
 
     // Should have called cacheGet for integration mappings
     expect(mockCacheGet).toHaveBeenCalledWith('hooks:integration-mappings')
-    // DB select should NOT have been called (cache hit)
-    expect(mockSelect).not.toHaveBeenCalled()
+    // Cache hit → the integration mappings were NOT re-queried + re-cached.
+    // (Assert on the mappings cache-refresh rather than the generic db.select,
+    // which the app-webhook resolver also uses now.)
+    expect(mockCacheSet).not.toHaveBeenCalledWith(
+      'hooks:integration-mappings',
+      expect.anything(),
+      expect.anything()
+    )
     // Should have a slack target
     const slackTargets = targets.filter((t) => t.type === 'slack')
     expect(slackTargets).toHaveLength(1)
@@ -190,9 +198,7 @@ describe('integration mapping caching', () => {
       },
     ]
 
-    mockCacheGet
-      .mockResolvedValueOnce(cachedMappings) // INTEGRATION_MAPPINGS
-      .mockResolvedValueOnce([]) // ACTIVE_WEBHOOKS
+    cacheByKey({ mappings: cachedMappings, webhooks: [] })
 
     const targets = await getHookTargets(makePostCreatedEvent())
 
@@ -214,9 +220,7 @@ describe('integration mapping caching', () => {
       },
     ]
 
-    mockCacheGet
-      .mockResolvedValueOnce(null) // INTEGRATION_MAPPINGS cache miss
-      .mockResolvedValueOnce([]) // ACTIVE_WEBHOOKS
+    cacheByKey({ webhooks: [] })
 
     setupIntegrationDbChain(dbRows)
 
@@ -229,6 +233,101 @@ describe('integration mapping caching', () => {
     // Target was returned
     const slackTargets = targets.filter((t) => t.type === 'slack')
     expect(slackTargets).toHaveLength(1)
+  })
+})
+
+describe('integration hook config', () => {
+  function mapping(overrides: Record<string, unknown>) {
+    return {
+      eventType: 'post.created',
+      secrets: JSON.stringify({ accessToken: 'tok' }),
+      actionConfig: { channelId: 'chan' },
+      filters: null,
+      ...overrides,
+    }
+  }
+
+  async function targetsFor(row: Record<string, unknown>) {
+    mockCacheGet.mockResolvedValueOnce([row]).mockResolvedValueOnce([])
+    return getHookTargets(makePostCreatedEvent())
+  }
+
+  it('forwards stored integration config and lets accessToken/rootUrl win', async () => {
+    const [jira] = (
+      await targetsFor(
+        mapping({
+          integrationType: 'jira',
+          integrationConfig: {
+            cloudId: 'cloud-1',
+            siteUrl: 'https://ex.atlassian.net',
+            accessToken: 'stale-from-config',
+            rootUrl: 'https://should-not-use',
+          },
+          actionConfig: { channelId: '10000:10001' },
+        })
+      )
+    ).filter((t) => t.type === 'jira')
+
+    expect(jira.config).toMatchObject({
+      cloudId: 'cloud-1',
+      siteUrl: 'https://ex.atlassian.net',
+      accessToken: 'tok',
+      rootUrl: 'https://test.quackback.io',
+    })
+  })
+
+  it('forwards organizationName, apiKey, and teamId from stored config', async () => {
+    mockCacheGet
+      .mockResolvedValueOnce([
+        mapping({
+          integrationType: 'azure_devops',
+          integrationConfig: { organizationName: 'acme' },
+          actionConfig: { channelId: 'Proj:Task' },
+        }),
+        mapping({
+          integrationType: 'trello',
+          integrationConfig: { apiKey: 'key-1' },
+          actionConfig: { channelId: 'list-1' },
+        }),
+        mapping({
+          integrationType: 'teams',
+          integrationConfig: { teamId: 'team-1' },
+          actionConfig: { channelId: 'ch-1' },
+        }),
+      ])
+      .mockResolvedValueOnce([])
+
+    const targets = await getHookTargets(makePostCreatedEvent())
+    expect(targets.find((t) => t.type === 'azure_devops')?.config).toMatchObject({
+      organizationName: 'acme',
+      accessToken: 'tok',
+    })
+    expect(targets.find((t) => t.type === 'trello')?.config).toMatchObject({ apiKey: 'key-1' })
+    expect(targets.find((t) => t.type === 'teams')?.config).toMatchObject({ teamId: 'team-1' })
+  })
+
+  it('does not put inbound webhook fields on the hook job', async () => {
+    const [jira] = (
+      await targetsFor(
+        mapping({
+          integrationType: 'jira',
+          integrationConfig: {
+            cloudId: 'cloud-1',
+            webhookSecret: 'whsec_should_not_leak',
+            statusMappings: { Done: 'status_1' },
+            statusSyncEnabled: true,
+            externalWebhookId: '99',
+          },
+          actionConfig: { channelId: '10000:10001' },
+        })
+      )
+    ).filter((t) => t.type === 'jira')
+
+    expect(jira.config).toMatchObject({ cloudId: 'cloud-1', accessToken: 'tok' })
+    expect(jira.config).not.toHaveProperty('webhookSecret')
+    expect(jira.config).not.toHaveProperty('statusMappings')
+    expect(jira.config).not.toHaveProperty('statusSyncEnabled')
+    expect(jira.config).not.toHaveProperty('externalWebhookId')
   })
 })
 
@@ -249,9 +348,7 @@ describe('webhook caching', () => {
       },
     ]
 
-    mockCacheGet
-      .mockResolvedValueOnce([]) // INTEGRATION_MAPPINGS (empty)
-      .mockResolvedValueOnce(cachedWebhooks) // ACTIVE_WEBHOOKS
+    cacheByKey({ mappings: [], webhooks: cachedWebhooks })
 
     // No DB setup needed for integration mappings since we return empty cache
     setupIntegrationDbChain([])
@@ -278,9 +375,7 @@ describe('webhook caching', () => {
       },
     ]
 
-    mockCacheGet
-      .mockResolvedValueOnce([]) // INTEGRATION_MAPPINGS (empty)
-      .mockResolvedValueOnce(null) // ACTIVE_WEBHOOKS cache miss
+    cacheByKey({ mappings: [] })
 
     setupIntegrationDbChain([])
     mockFindMany.mockResolvedValue(dbWebhooks)
@@ -315,9 +410,7 @@ describe('webhook caching', () => {
       },
     ]
 
-    mockCacheGet
-      .mockResolvedValueOnce([]) // INTEGRATION_MAPPINGS
-      .mockResolvedValueOnce(cachedWebhooks) // ACTIVE_WEBHOOKS
+    cacheByKey({ mappings: [], webhooks: cachedWebhooks })
 
     setupIntegrationDbChain([])
 
@@ -349,9 +442,7 @@ describe('webhook caching', () => {
       },
     ]
 
-    mockCacheGet
-      .mockResolvedValueOnce([]) // INTEGRATION_MAPPINGS
-      .mockResolvedValueOnce(cachedWebhooks) // ACTIVE_WEBHOOKS
+    cacheByKey({ mappings: [], webhooks: cachedWebhooks })
 
     setupIntegrationDbChain([])
 
