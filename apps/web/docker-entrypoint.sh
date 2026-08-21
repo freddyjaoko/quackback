@@ -1,13 +1,26 @@
 #!/bin/sh
 set -e
 
+# If the process manager passed a command, run it instead of the default
+# start path. Release-phase tasks (migrate once per deploy) and one-off
+# dynos land here. A single argument is often the whole command line.
+if [ "$#" -gt 0 ]; then
+  echo "========================================"
+  echo "  Quackback process command..."
+  echo "========================================"
+  if [ "$#" -eq 1 ]; then
+    exec /bin/sh -c "$1"
+  fi
+  exec "$@"
+fi
+
 echo "========================================"
 echo "  Quackback starting..."
 echo "========================================"
 
-# Migrations: skipped in K8s where a pre-upgrade Helm hook Job runs them
-# before pods roll. Set SKIP_MIGRATIONS=true to opt out of the on-start
-# migration step. Default behavior matches `docker run` ergonomics.
+# Migrations: skipped when a release/pre-upgrade job already ran them.
+# Set SKIP_MIGRATIONS=true to opt out of the on-start migration step.
+# Default behavior matches `docker run` ergonomics.
 if [ "$SKIP_MIGRATIONS" = "true" ]; then
   echo ""
   echo "SKIP_MIGRATIONS=true — skipping startup migration (handled out-of-band)"

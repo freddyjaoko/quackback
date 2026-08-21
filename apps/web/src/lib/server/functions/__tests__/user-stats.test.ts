@@ -8,6 +8,7 @@ vi.mock('@tanstack/react-start', () => ({
     }),
     handler: (fn: (...args: unknown[]) => unknown) => fn,
   }),
+  createServerOnlyFn: <T>(fn: T) => fn,
 }))
 
 // Mock auth

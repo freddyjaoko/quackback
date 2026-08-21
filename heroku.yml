@@ -1,5 +1,18 @@
+# Heroku container-stack manifest.
+#
+# The platform always uses the Dockerfile's own directory as the build
+# context, so `web` must point at the repo-root Dockerfile (a pointer to
+# apps/web/Dockerfile). Pointing at apps/web/Dockerfile would make the
+# context apps/web and break the monorepo COPY of packages/.
+#
+# Release runs migrations once per deploy. The web process is started with an
+# explicit command so the image entrypoint does not migrate again on every boot.
 build:
   docker:
     web: Dockerfile
+release:
+  command:
+    - bun /app/migrate.mjs
+  image: web
 run:
-  web: bun run start
+  web: bun .output/server/index.mjs

@@ -25,6 +25,7 @@ vi.mock('@tanstack/react-start', () => ({
     }
     return chain
   },
+  createServerOnlyFn: <T>(fn: T) => fn,
 }))
 
 vi.mock('@/lib/server/domains/notifications/notification.service', () => ({}))
