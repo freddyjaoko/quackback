@@ -6,9 +6,10 @@ const PORTAL_LAYOUT_ROUTE_ID = '/_portal'
 
 // Standalone routes (outside the portal layout) that render translated content
 // from their first paint. Everything NOT in this set and NOT under the portal
-// layout renders hard-coded English: the admin app, onboarding, and the auth
-// utility pages like /auth/two-factor and /admin/login.
+// layout renders hard-coded English: the admin app (except automation) and the
+// auth utility pages like /auth/two-factor and /admin/login.
 const LOCALIZED_ROUTE_IDS = new Set(['/auth/recovery', '/auth/reset-password', '/widget'])
+const LOCALIZED_ROUTE_PREFIXES = ['/admin/automation', '/onboarding/_layout']
 
 /**
  * The locale the SSR document's `<html lang>`/`dir` should advertise, decided
@@ -25,7 +26,11 @@ export function documentLocale(
 ): SupportedLocale {
   const localized =
     routeIds.includes(PORTAL_LAYOUT_ROUTE_ID) ||
-    routeIds.some((id) => LOCALIZED_ROUTE_IDS.has(id) || id.startsWith('/admin/automation'))
+    routeIds.some(
+      (id) =>
+        LOCALIZED_ROUTE_IDS.has(id) ||
+        LOCALIZED_ROUTE_PREFIXES.some((prefix) => id.startsWith(prefix))
+    )
   return localized ? resolved : DEFAULT_LOCALE
 }
 

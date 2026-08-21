@@ -2,6 +2,8 @@ import { createFileRoute, Outlet, redirect, useLocation } from '@tanstack/react-
 import { getSetupState, isOnboardingComplete } from '@/lib/shared/db-types'
 import { CheckIcon } from '@heroicons/react/24/solid'
 import { FormattedMessage, useIntl } from 'react-intl'
+import { PortalIntlProvider } from '@/components/portal-intl-provider'
+import { DEFAULT_LOCALE, loadMessages } from '@/lib/shared/i18n'
 import { ALL_ONBOARDING_STEPS } from './-onboarding-steps'
 
 /**
@@ -10,6 +12,11 @@ import { ALL_ONBOARDING_STEPS } from './-onboarding-steps'
  * which is shown once after finishing onboarding).
  */
 export const Route = createFileRoute('/onboarding/_layout')({
+  loader: async ({ context }) => {
+    const locale = context.acceptLanguageLocale ?? DEFAULT_LOCALE
+    const messages = await loadMessages(locale)
+    return { locale, messages }
+  },
   beforeLoad: ({ context, location }) => {
     // A pre-stamped workspace still needs an authenticated owner. Redirecting
     // an anonymous visitor to the handoff would bounce between that route and
@@ -113,21 +120,25 @@ function OnboardingHeader() {
 }
 
 function OnboardingLayout() {
-  return (
-    <div className="min-h-screen bg-background">
-      <main className="relative flex min-h-screen flex-col px-4 sm:px-6">
-        {/* Zone 1: Header — pinned near top */}
-        <div className="shrink-0 pt-10 sm:pt-16">
-          <OnboardingHeader />
-        </div>
+  const { locale, messages } = Route.useLoaderData()
 
-        {/* Zone 2: Content — flows below header, top-aligned */}
-        <div className="flex flex-1 items-start justify-center pb-16 pt-10">
-          <div className="w-full animate-in fade-in slide-in-from-bottom-2 duration-300 motion-reduce:animate-none">
-            <Outlet />
+  return (
+    <PortalIntlProvider locale={locale} messages={messages}>
+      <div className="min-h-screen bg-background">
+        <main className="relative flex min-h-screen flex-col px-4 sm:px-6">
+          {/* Zone 1: Header — pinned near top */}
+          <div className="shrink-0 pt-10 sm:pt-16">
+            <OnboardingHeader />
           </div>
-        </div>
-      </main>
-    </div>
+
+          {/* Zone 2: Content — flows below header, top-aligned */}
+          <div className="flex flex-1 items-start justify-center pb-16 pt-10">
+            <div className="w-full animate-in fade-in slide-in-from-bottom-2 duration-300 motion-reduce:animate-none">
+              <Outlet />
+            </div>
+          </div>
+        </main>
+      </div>
+    </PortalIntlProvider>
   )
 }

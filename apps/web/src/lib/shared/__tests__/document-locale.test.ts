@@ -9,9 +9,15 @@ describe('documentLocale', () => {
     expect(documentLocale(['__root__', '/_portal', '/_portal/hc'], 'zh-cn')).toBe('zh-cn')
     expect(documentLocale(['__root__', '/_portal', '/_portal/roadmap/'], 'zh-tw')).toBe('zh-tw')
   })
-  it('localizes the standalone auth and widget routes', () => {
+  it('localizes the standalone auth, widget, and onboarding-step routes', () => {
     expect(documentLocale(['__root__', '/auth/reset-password'], 'zh-cn')).toBe('zh-cn')
     expect(documentLocale(['__root__', '/widget'], 'ar')).toBe('ar')
+    expect(
+      documentLocale(
+        ['__root__', '/onboarding', '/onboarding/_layout', '/onboarding/_layout/account'],
+        'ar'
+      )
+    ).toBe('ar')
   })
   it('keeps untranslated auth utility pages on the default locale', () => {
     // These render hard-coded English with no IntlProvider — labeling them
@@ -27,6 +33,7 @@ describe('documentLocale', () => {
     // it stays English until that copy is localized.
     expect(documentLocale(['__root__', '/admin/login'], 'ar')).toBe('en')
     expect(documentLocale(['__root__', '/admin/posts'], 'zh-cn')).toBe('en')
+    // The /onboarding index only redirects; the steps under _layout are localized.
     expect(documentLocale(['__root__', '/onboarding'], 'ar')).toBe('en')
     expect(documentLocale(['__root__', '/apps'], 'zh-cn')).toBe('en')
     expect(documentLocale(['__root__', '/unsubscribe'], 'zh-cn')).toBe('en')
