@@ -8,6 +8,7 @@
  * the key is the neighbouring reserved value.
  */
 import postgres from 'postgres'
+import { postgresSsl } from '@/lib/server/db'
 import { config } from '@/lib/server/config'
 import { logger } from '@/lib/server/logger'
 
@@ -29,7 +30,11 @@ export interface RelayLeadership {
  * then idles, retrying later). Non-blocking: uses pg_try_advisory_lock.
  */
 export async function tryAcquireRelayLeadership(): Promise<RelayLeadership | null> {
-  const sql = postgres(config.databaseUrl, { max: 1, idle_timeout: 0 })
+  const sql = postgres(config.databaseUrl, {
+    max: 1,
+    idle_timeout: 0,
+    ssl: postgresSsl(config.databaseUrl),
+  })
   try {
     const rows = await sql<{ locked: boolean }[]>`
       SELECT pg_try_advisory_lock(${OUTBOX_RELAY_LOCK_KEY}::bigint) AS locked

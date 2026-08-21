@@ -8,6 +8,7 @@
 import Redis from 'ioredis'
 import { config } from './config'
 import { logger } from '@/lib/server/logger'
+import { redisConnectionOptions } from './redis-connection'
 
 const log = logger.child({ component: 'redis' })
 
@@ -19,6 +20,7 @@ export function getRedis(): Redis {
       maxRetriesPerRequest: 3,
       connectTimeout: 5_000,
       lazyConnect: true,
+      ...redisConnectionOptions(config.redisUrl),
     })
     client.on('error', (err) => {
       log.error({ err }, 'connection error')

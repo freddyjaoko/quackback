@@ -53,7 +53,7 @@
     "worktree:bootstrap": "./scripts/worktree-bootstrap.sh",
     "dev": "bun run --filter @quackback/web dev",
     "build": "bun run --filter @quackback/widget build && bun run --filter @quackback/web build",
-    "heroku-postbuild": "bun run --filter @quackback/widget build && bun run --filter @quackback/web build",
+    "heroku-postbuild": "true",
     "start": "bun run ./apps/web/.output/server/index.mjs",
     "lint": "eslint . --ext .ts,.tsx",
     "test": "vitest",

@@ -8,6 +8,7 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import * as schema from './schema'
 import { seedSystemData } from './seed-system'
+import { postgresSsl } from './client'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -57,7 +58,7 @@ async function runMigrations() {
   console.log(`   Migrations folder: ${migrationsFolder}`)
 
   // Use a single connection for migrations
-  const sql = postgres(connectionString, { max: 1 })
+  const sql = postgres(connectionString, { max: 1, ssl: postgresSsl(connectionString) })
   const db = drizzle(sql, { schema })
 
   try {

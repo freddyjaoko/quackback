@@ -14,6 +14,30 @@ export interface CreateDbOptions {
 }
 
 /**
+ * TLS options for hosted Postgres (Heroku, RDS, etc.). Local/compose hosts
+ * stay plaintext; remote hosts require TLS. Certificate verification is
+ * skipped because platform CAs are often not in the public trust store.
+ */
+export function postgresSsl(connectionString: string): { rejectUnauthorized: boolean } | undefined {
+  let host: string
+  try {
+    host = new URL(connectionString).hostname
+  } catch {
+    return undefined
+  }
+  if (
+    host === 'localhost' ||
+    host === '127.0.0.1' ||
+    host === '::1' ||
+    host === 'postgres' ||
+    host === 'db'
+  ) {
+    return undefined
+  }
+  return { rejectUnauthorized: false }
+}
+
+/**
  * Create a Drizzle database client from a connection string.
  * This is a pure factory function with no runtime-specific dependencies.
  */
@@ -22,6 +46,7 @@ export function createDb(connectionString: string, options?: CreateDbOptions): D
     max: options?.max ?? 10,
     prepare: options?.prepare ?? true,
     idle_timeout: options?.idleTimeout ?? 20,
+    ssl: postgresSsl(connectionString),
   })
   return drizzle(sql, { schema })
 }

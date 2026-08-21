@@ -17,6 +17,7 @@ import Redis from 'ioredis'
 import { config } from '../config'
 import { getRedis } from '../redis'
 import { logger } from '@/lib/server/logger'
+import { redisConnectionOptions } from '../redis-connection'
 
 const log = logger.child({ component: 'pubsub' })
 
@@ -34,6 +35,7 @@ function getSubscriber(): Redis {
       // for the life of the process behind the registry.
       maxRetriesPerRequest: null,
       connectTimeout: 5_000,
+      ...redisConnectionOptions(config.redisUrl),
     })
     subscriber.on('message', (channel: string, message: string) => {
       const set = listeners.get(channel)

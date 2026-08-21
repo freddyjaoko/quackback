@@ -1,0 +1,12 @@
+# Keep the slug small: these are not needed to build or run on Heroku.
+.github/
+.cursor/
+.claude/
+.vscode/
+docs/
+artifacts/
+apps/web/e2e/
+apps/web/evals/
+deploy/
+.husky/
+*.md

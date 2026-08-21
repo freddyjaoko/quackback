@@ -8,8 +8,10 @@
  * import { db, eq, and, posts } from '@/lib/server/db'
  */
 
-import { createDb, type Database as PostgresDatabase } from '@quackback/db/client'
+import { createDb, postgresSsl, type Database as PostgresDatabase } from '@quackback/db/client'
 import { config } from '@/lib/server/config'
+
+export { postgresSsl }
 
 // Import drizzle-orm operators explicitly to work around Nitro bundler issues
 // with nested barrel exports. If we use `export { asc } from 'drizzle-orm'`,

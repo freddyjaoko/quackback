@@ -1,5 +1,6 @@
 import IORedis from 'ioredis'
 import { config } from '@/lib/server/config'
+import { redisConnectionOptions } from '@/lib/server/redis-connection'
 
 /**
  * Single shared IORedis connection for every BullMQ Queue + Worker in the
@@ -18,6 +19,7 @@ export function getQueueRedis(): IORedis {
     _shared = new IORedis(config.redisUrl, {
       maxRetriesPerRequest: null,
       connectTimeout: 5_000,
+      ...redisConnectionOptions(config.redisUrl),
     })
   }
   return _shared
