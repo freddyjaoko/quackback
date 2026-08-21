@@ -11,7 +11,7 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import * as schema from './schema'
 import { seedSystemData } from './seed-system'
-import { postgresSsl } from './client'
+import { pinExtensionSearchPath, postgresSsl, POSTGRES_SESSION_PARAMS } from './client'
 
 // Get the directory of this file to resolve the migrations folder
 const __filename = fileURLToPath(import.meta.url)
@@ -34,8 +34,13 @@ export async function runMigrations(connectionString?: string): Promise<void> {
   }
 
   // Use a single connection for migrations
-  const sql = postgres(connStr, { max: 1, ssl: postgresSsl(connStr) })
+  const sql = postgres(connStr, {
+    max: 1,
+    ssl: postgresSsl(connStr),
+    connection: POSTGRES_SESSION_PARAMS,
+  })
   const database = drizzle(sql, { schema })
+  await pinExtensionSearchPath(sql)
 
   try {
     await migrate(database, { migrationsFolder: MIGRATIONS_FOLDER })

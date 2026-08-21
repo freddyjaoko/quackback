@@ -8,7 +8,7 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import * as schema from './schema'
 import { seedSystemData } from './seed-system'
-import { postgresSsl } from './client'
+import { pinExtensionSearchPath, postgresSsl, POSTGRES_SESSION_PARAMS } from './client'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -58,8 +58,13 @@ async function runMigrations() {
   console.log(`   Migrations folder: ${migrationsFolder}`)
 
   // Use a single connection for migrations
-  const sql = postgres(connectionString, { max: 1, ssl: postgresSsl(connectionString) })
+  const sql = postgres(connectionString, {
+    max: 1,
+    ssl: postgresSsl(connectionString),
+    connection: POSTGRES_SESSION_PARAMS,
+  })
   const db = drizzle(sql, { schema })
+  await pinExtensionSearchPath(sql)
 
   try {
     // Serialize concurrent replicas racing to migrate on startup: the first

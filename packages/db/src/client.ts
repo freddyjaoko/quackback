@@ -38,6 +38,21 @@ export function postgresSsl(connectionString: string): { rejectUnauthorized: boo
 }
 
 /**
+ * Heroku Essential (Aurora) rejects CREATE EXTENSION when pg_temp is
+ * implicitly first in current_schemas() — which happens after any TEMP
+ * object is created. Pinning pg_temp last keeps CREATE EXTENSION legal.
+ * This is also PostgreSQL's default plus an explicit pg_temp, so it is
+ * safe on local/compose.
+ */
+export const POSTGRES_SESSION_PARAMS = {
+  search_path: '"$user", public, pg_temp',
+} as const
+
+export async function pinExtensionSearchPath(sql: ReturnType<typeof postgres>): Promise<void> {
+  await sql.unsafe('SET search_path TO "$user", public, pg_temp')
+}
+
+/**
  * Create a Drizzle database client from a connection string.
  * This is a pure factory function with no runtime-specific dependencies.
  */
@@ -47,6 +62,7 @@ export function createDb(connectionString: string, options?: CreateDbOptions): D
     prepare: options?.prepare ?? true,
     idle_timeout: options?.idleTimeout ?? 20,
     ssl: postgresSsl(connectionString),
+    connection: POSTGRES_SESSION_PARAMS,
   })
   return drizzle(sql, { schema })
 }
