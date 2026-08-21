@@ -21,6 +21,10 @@ const __dirname = path.dirname(__filename)
 const MIGRATION_LOCK_KEY = 4_820_231_099
 
 async function ensureConcurrentIndexes(sql: ReturnType<typeof postgres>): Promise<void> {
+  // 0215 creates pg_temp functions on this session. Some managed Postgres
+  // providers reject CREATE EXTENSION while the temp schema is dirty.
+  await sql.unsafe('DISCARD TEMP')
+  await pinExtensionSearchPath(sql)
   await sql`CREATE EXTENSION IF NOT EXISTS pg_trgm`
   const statements = [
     'CREATE INDEX CONCURRENTLY IF NOT EXISTS posts_embedding_hnsw_idx ON posts USING hnsw (embedding vector_cosine_ops) WHERE embedding IS NOT NULL',

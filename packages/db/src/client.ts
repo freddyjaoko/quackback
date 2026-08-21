@@ -14,9 +14,9 @@ export interface CreateDbOptions {
 }
 
 /**
- * TLS options for hosted Postgres (Heroku, RDS, etc.). Local/compose hosts
- * stay plaintext; remote hosts require TLS. Certificate verification is
- * skipped because platform CAs are often not in the public trust store.
+ * TLS options for hosted Postgres. Local/compose hosts stay plaintext;
+ * remote hosts require TLS. Certificate verification is skipped because
+ * platform CAs are often not in the public trust store.
  */
 export function postgresSsl(connectionString: string): { rejectUnauthorized: boolean } | undefined {
   let host: string
@@ -38,7 +38,7 @@ export function postgresSsl(connectionString: string): { rejectUnauthorized: boo
 }
 
 /**
- * Heroku Essential (Aurora) rejects CREATE EXTENSION when pg_temp is
+ * Some managed Postgres providers reject CREATE EXTENSION when pg_temp is
  * implicitly first in current_schemas() — which happens after any TEMP
  * object is created. Pinning pg_temp last keeps CREATE EXTENSION legal.
  * This is also PostgreSQL's default plus an explicit pg_temp, so it is
