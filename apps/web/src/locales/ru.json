@@ -30,7 +30,6 @@
   "widget.shell.aria.collapse": "Свернуть виджет",
   "widget.shell.aria.userMenu": "Меню пользователя",
   "widget.shell.aria.goToPortal": "Перейти на портал",
-  "widget.shell.poweredBy": "На базе {brand}",
   "widget.shell.goToPortal": "Портал",
   "widget.shell.goToPortal.error": "Не удалось создать ссылку для входа, попробуйте ещё раз",
   "widget.home.input.placeholder": "Опишите ваше предложение",

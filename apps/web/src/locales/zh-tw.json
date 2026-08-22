@@ -30,7 +30,6 @@
   "widget.shell.aria.collapse": "收合小工具",
   "widget.shell.aria.userMenu": "使用者選單",
   "widget.shell.aria.goToPortal": "前往入口網站",
-  "widget.shell.poweredBy": "由 {brand} 提供",
   "widget.shell.goToPortal": "入口網站",
   "widget.shell.goToPortal.error": "無法產生登入連結，請再試一次",
   "widget.home.input.placeholder": "你有什麼想法？",

@@ -74,7 +74,6 @@ interface PortalAccessProps {
 }
 
 interface WidgetShellProps {
-  orgSlug: string
   activeTab: WidgetTab
   onTabChange: (tab: WidgetTab) => void
   onBack?: () => void
@@ -111,7 +110,6 @@ interface WidgetShellProps {
 }
 
 export function WidgetShell({
-  orgSlug,
   activeTab,
   onTabChange,
   onBack,
@@ -422,29 +420,6 @@ export function WidgetShell({
             </motion.div>
           )}
         </AnimatePresence>
-
-        <div className="border-t border-border/20 py-2 flex items-center justify-center">
-          <a
-            href={`https://quackback.io?utm_campaign=${encodeURIComponent(orgSlug || 'unknown')}&utm_content=widget&utm_medium=referral&utm_source=powered-by`}
-            target="_blank"
-            className="group inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-all"
-          >
-            <img
-              src="/logo.png"
-              alt=""
-              width={11}
-              height={11}
-              className="opacity-60 group-hover:opacity-100 transition-opacity"
-            />
-            <span>
-              <FormattedMessage
-                id="widget.shell.poweredBy"
-                defaultMessage="Powered by {brand}"
-                values={{ brand: <span className="font-medium">Quackback</span> }}
-              />
-            </span>
-          </a>
-        </div>
       </div>
     </div>
   )

@@ -30,7 +30,6 @@
   "widget.shell.aria.collapse": "Widget verkleinern",
   "widget.shell.aria.userMenu": "Benutzermenü",
   "widget.shell.aria.goToPortal": "Zum Portal wechseln",
-  "widget.shell.poweredBy": "Bereitgestellt von {brand}",
   "widget.shell.goToPortal": "Portal",
   "widget.shell.goToPortal.error": "Anmeldelink konnte nicht erstellt werden, bitte versuchen Sie es erneut",
   "widget.home.input.placeholder": "Was ist Ihre Idee?",
