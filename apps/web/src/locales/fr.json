@@ -30,7 +30,6 @@
   "widget.shell.aria.collapse": "Réduire le widget",
   "widget.shell.aria.userMenu": "Menu utilisateur",
   "widget.shell.aria.goToPortal": "Aller au portail",
-  "widget.shell.poweredBy": "Propulsé par {brand}",
   "widget.shell.goToPortal": "Portail",
   "widget.shell.goToPortal.error": "Impossible de générer le lien de connexion, veuillez réessayer",
   "widget.home.input.placeholder": "Quelle est votre idée ?",

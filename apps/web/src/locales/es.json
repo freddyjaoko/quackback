@@ -30,7 +30,6 @@
   "widget.shell.aria.collapse": "Contraer el widget",
   "widget.shell.aria.userMenu": "Menú de usuario",
   "widget.shell.aria.goToPortal": "Ir al portal",
-  "widget.shell.poweredBy": "Desarrollado con {brand}",
   "widget.shell.goToPortal": "Portal",
   "widget.shell.goToPortal.error": "No se pudo generar el enlace de inicio de sesión, inténtalo de nuevo",
   "widget.home.input.placeholder": "¿Cuál es tu idea?",

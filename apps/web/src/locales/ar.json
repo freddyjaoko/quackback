@@ -30,7 +30,6 @@
   "widget.shell.aria.collapse": "طي الأداة",
   "widget.shell.aria.userMenu": "قائمة المستخدم",
   "widget.shell.aria.goToPortal": "الانتقال إلى البوابة",
-  "widget.shell.poweredBy": "مدعوم بواسطة {brand}",
   "widget.shell.goToPortal": "البوابة",
   "widget.shell.goToPortal.error": "تعذّر إنشاء رابط تسجيل الدخول، يُرجى المحاولة مرة أخرى",
   "widget.home.input.placeholder": "ما هي فكرتك؟",

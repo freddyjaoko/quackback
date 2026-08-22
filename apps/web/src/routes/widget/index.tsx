@@ -231,7 +231,6 @@ export const Route = createFileRoute('/widget/')({
         name: b.name,
         slug: b.slug,
       })),
-      orgSlug: settings?.slug ?? '',
       // Per-board submit/vote capability for the request actor, server-computed
       // (boardCapabilitiesForActor composes each board's access tier with the
       // workspace anonymous switch). The widget gates its submit/vote CTAs per
@@ -364,7 +363,6 @@ function WidgetPage() {
     postsHasMore,
     statuses,
     boards,
-    orgSlug,
     boardPermissions,
     tabs,
     linkPreviews,
@@ -716,7 +714,6 @@ function WidgetPage() {
 
   return (
     <WidgetShell
-      orgSlug={orgSlug}
       activeTab={activeTab}
       onTabChange={handleTabChange}
       onBack={shellOnBack}
